@@ -14,14 +14,17 @@ python -m pip install .
 2. Create a `.env` file in the project root with the variables below, or set them in your shell:
 
 ```powershell
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NVIDIA_API_KEY=your_nvidia_api_key
-NVIDIA_API_URL=https://api.nvidia.com/v1/engines/gpt-35-turbo/completions
+NVIDIA_MODEL=openai/gpt-oss-120b
 MYSQL_HOST=localhost
 MYSQL_PORT=3306
 MYSQL_USER=root
 MYSQL_PASSWORD=your_password
 MYSQL_DATABASE=product_demo_db
 ```
+
+You can also keep using the old NVIDIA API URL format by setting `NVIDIA_API_URL` instead of `NVIDIA_BASE_URL`.
 
 If you prefer, install from `requirements.txt` instead of the package:
 

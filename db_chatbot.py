@@ -24,12 +24,20 @@ class NvidiaLLMClient:
     @classmethod
     def from_env(cls) -> "NvidiaLLMClient":
         api_key = os.getenv("NVIDIA_API_KEY", "")
-        api_url = os.getenv("NVIDIA_API_URL", "")
-        model = os.getenv("NVIDIA_MODEL", "gpt-35-turbo")
+        base_url = os.getenv("NVIDIA_BASE_URL", "").strip()
+        api_url = os.getenv("NVIDIA_API_URL", "").strip()
+        model = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
+
         if not api_key:
             raise ValueError("Missing NVIDIA_API_KEY environment variable.")
+
+        if base_url:
+            api_url = base_url
         if not api_url:
-            raise ValueError("Missing NVIDIA_API_URL environment variable.")
+            raise ValueError(
+                "Missing NVIDIA_BASE_URL or NVIDIA_API_URL environment variable."
+            )
+
         return cls(api_key=api_key, api_url=api_url, model=model)
 
     def complete(self, prompt: str) -> str:
@@ -44,7 +52,11 @@ class NvidiaLLMClient:
             "max_output_tokens": 1024,
         }
 
-        response = requests.post(self.api_url, headers=headers, json=payload, timeout=60)
+        api_url = self.api_url.rstrip("/")
+        if api_url.endswith("/v1"):
+            api_url = api_url + "/responses"
+
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
 
         body = response.json()
