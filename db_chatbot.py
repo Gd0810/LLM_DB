@@ -73,28 +73,44 @@ class NvidiaLLMClient:
         return self._parse_response(body)
 
     @staticmethod
+    def _extract_text(value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("text", "content", "message"):
+                if key in value:
+                    extracted = NvidiaLLMClient._extract_text(value[key])
+                    if extracted:
+                        return extracted
+        if isinstance(value, list):
+            for item in value:
+                extracted = NvidiaLLMClient._extract_text(item)
+                if extracted:
+                    return extracted
+        return None
+
+    @staticmethod
     def _parse_response(body: Dict[str, Any]) -> str:
         if isinstance(body, dict):
             if "choices" in body and body["choices"]:
                 first = body["choices"][0]
                 if isinstance(first, dict):
-                    if "text" in first:
-                        return first["text"]
-                    if "message" in first and isinstance(first["message"], dict):
-                        return first["message"].get("content", "")
-            if "outputs" in body and body["outputs"]:
-                output = body["outputs"][0]
-                if isinstance(output, dict):
-                    if "content" in output:
-                        content = output["content"]
-                        if isinstance(content, list) and content:
-                            first = content[0]
-                            if isinstance(first, dict):
-                                return first.get("text", "")
-                            if isinstance(first, str):
-                                return first
-                    if "text" in output:
-                        return output["text"]
+                    text = NvidiaLLMClient._extract_text(first)
+                    if text:
+                        return text
+            for key in ("outputs", "output"):
+                if key in body and body[key]:
+                    entries = body[key]
+                    if isinstance(entries, list):
+                        first = entries[0]
+                    else:
+                        first = entries
+                    text = NvidiaLLMClient._extract_text(first)
+                    if text:
+                        return text
+            text = NvidiaLLMClient._extract_text(body)
+            if text:
+                return text
         raise ValueError("Unable to parse NVIDIA LLM response. Received: %s" % json.dumps(body))
 
 
