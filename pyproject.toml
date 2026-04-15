@@ -1,7 +1,13 @@
 [project]
 name = "llm-db"
 version = "0.1.0"
-description = "Add your description here"
+description = "LLM chatbot for MySQL database retrieval"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "mysql-connector-python>=8.0.34",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+llm-db = "main:main"
