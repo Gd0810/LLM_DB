@@ -11,16 +11,22 @@ python -m pip install -U pip
 python -m pip install .
 ```
 
-2. Set environment variables:
+2. Create a `.env` file in the project root with the variables below, or set them in your shell:
 
 ```powershell
-set NVIDIA_API_KEY=your_nvidia_api_key
-set NVIDIA_API_URL=https://api.nvidia.com/v1/engines/gpt-35-turbo/completions
-set MYSQL_HOST=localhost
-set MYSQL_PORT=3306
-set MYSQL_USER=root
-set MYSQL_PASSWORD=your_password
-set MYSQL_DATABASE=product_demo_db
+NVIDIA_API_KEY=your_nvidia_api_key
+NVIDIA_API_URL=https://api.nvidia.com/v1/engines/gpt-35-turbo/completions
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=product_demo_db
+```
+
+If you prefer, install from `requirements.txt` instead of the package:
+
+```powershell
+python -m pip install -r requirements.txt
 ```
 
 3. Run the chatbot:

@@ -1,5 +1,8 @@
+from dotenv import load_dotenv
 from db_chatbot import DatabaseChatbot
 
+
+load_dotenv()
 
 def main() -> None:
     try:
