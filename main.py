@@ -21,6 +21,9 @@ def main() -> None:
                 continue
             if question.lower() in {"exit", "quit", "bye"}:
                 break
+            if question.lower() in {"show data", "what data", "available data"}:
+                print(chatbot.show_available_data())
+                continue
 
             try:
                 answer = chatbot.answer_question(question)

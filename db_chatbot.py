@@ -209,6 +209,17 @@ class DatabaseChatbot:
                 columns = [f"{column[0]} {column[1]}" for column in cursor.fetchall() or []]
                 table_definitions.append(f"{table}: {', '.join(columns)}")
 
+                # Add sample data for each table
+                cursor.execute(f"SELECT * FROM `{table}` LIMIT 3")
+                sample_rows = cursor.fetchall() or []
+                if sample_rows:
+                    sample_data = []
+                    for row in sample_rows:
+                        row_data = [f"{col}: {val}" for col, val in zip([desc[0] for desc in cursor.description], row)]
+                        sample_data.append(f"  {{{', '.join(row_data)}}}")
+                    table_definitions.append(f"Sample data from {table}:")
+                    table_definitions.extend(sample_data)
+
             cursor.execute(
                 "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
                 "FROM information_schema.key_column_usage "
@@ -235,6 +246,10 @@ class DatabaseChatbot:
             "Use standard MySQL syntax and prefer simple joins when needed. "
             "Output only the SQL query itself, without explanation or analysis. "
             "If the question is not a database query, do not return SQL.\n\n"
+            "How to query categories:\n"
+            "- To find products in a category: SELECT p.* FROM product p JOIN product_category c ON p.category_id = c.category_id WHERE c.category_name = 'CategoryName'\n"
+            "- To list all categories: SELECT * FROM product_category\n"
+            "- To find sales for a product: SELECT s.* FROM product_sales s JOIN product p ON s.product_id = p.product_id WHERE p.product_name = 'ProductName'\n\n"
             "Example queries:\n"
             "- List all products: SELECT * FROM product\n"
             "- Products by category: SELECT p.product_name, c.category_name FROM product p JOIN product_category c ON p.category_id = c.category_id\n"
@@ -379,10 +394,40 @@ class DatabaseChatbot:
                 "You can inspect the raw response for debugging."
             )
 
+        # Debug: print the SQL query
+        print(f"DEBUG SQL: {sql}")
 
         rows = self._execute_sql(sql)
         return self._format_results(rows, question)
 
-    def close(self) -> None:
-        if self.connection.is_connected():
-            self.connection.close()
+    def show_available_data(self) -> str:
+        """Show what categories and products exist in the database."""
+        with self.connection.cursor(dictionary=True) as cursor:
+            # Get categories
+            cursor.execute("SELECT category_name FROM product_category")
+            categories = [row['category_name'] for row in cursor.fetchall()]
+
+            # Get products with categories
+            cursor.execute("""
+                SELECT p.product_name, c.category_name, p.product_price
+                FROM product p
+                JOIN product_category c ON p.category_id = c.category_id
+                ORDER BY c.category_name, p.product_name
+            """)
+            products = cursor.fetchall()
+
+            # Get sales data
+            cursor.execute("SELECT COUNT(*) as total_sales FROM product_sales")
+            sales_count = cursor.fetchone()['total_sales']
+
+        result = f"Available categories: {', '.join(categories)}\n\n"
+        result += "Products by category:\n"
+        current_category = None
+        for product in products:
+            if product['category_name'] != current_category:
+                current_category = product['category_name']
+                result += f"\n{current_category}:\n"
+            result += f"  - {product['product_name']} (₹{product['product_price']})\n"
+
+        result += f"\nTotal sales records: {sales_count}"
+        return result
