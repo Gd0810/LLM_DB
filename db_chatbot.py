@@ -57,6 +57,16 @@ class NvidiaLLMClient:
             api_url = api_url + "/responses"
 
         response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        if response.status_code == 401:
+            raise ValueError(
+                "Unauthorized: NVIDIA API key was rejected. "
+                "Check NVIDIA_API_KEY, NVIDIA_BASE_URL, and NVIDIA_MODEL in your .env file."
+            )
+        if response.status_code == 403:
+            raise ValueError(
+                "Forbidden: NVIDIA API key does not have access to the requested model or endpoint. "
+                "Verify your key permissions and model name."
+            )
         response.raise_for_status()
 
         body = response.json()
