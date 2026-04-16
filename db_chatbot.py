@@ -1,7 +1,7 @@
 import os
 import re
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import mysql.connector
@@ -144,6 +144,21 @@ class NvidiaLLMClient:
 
 
 class DatabaseChatbot:
+    VALID_OPERATIONS = {"read", "create", "update", "delete", "none"}
+    VALID_FILTER_OPERATORS = {
+        "=",
+        "!=",
+        ">",
+        "<",
+        ">=",
+        "<=",
+        "LIKE",
+        "IN",
+        "BETWEEN",
+        "IS NULL",
+        "IS NOT NULL",
+    }
+
     def __init__(
         self,
         mysql_host: str,
@@ -152,9 +167,11 @@ class DatabaseChatbot:
         mysql_password: str,
         mysql_database: str,
         llm_client: NvidiaLLMClient,
+        max_read_rows: int = 200,
     ):
         self.mysql_database = mysql_database
         self.llm_client = llm_client
+        self.max_read_rows = max(1, max_read_rows)
         self.connection = self._connect(
             host=mysql_host,
             port=mysql_port,
@@ -162,7 +179,8 @@ class DatabaseChatbot:
             password=mysql_password,
             database=mysql_database,
         )
-        self.schema_description = self._load_schema_description()
+        self.schema = self._load_schema_metadata()
+        self.schema_description = self._build_schema_description()
 
     @classmethod
     def from_env(cls) -> "DatabaseChatbot":
@@ -170,7 +188,12 @@ class DatabaseChatbot:
         mysql_port = int(os.getenv("MYSQL_PORT", "3306"))
         mysql_user = os.getenv("MYSQL_USER", "root")
         mysql_password = os.getenv("MYSQL_PASSWORD", "")
-        mysql_database = os.getenv("MYSQL_DATABASE", "product_demo_db")
+        mysql_database = os.getenv("MYSQL_DATABASE", "")
+        max_read_rows = int(os.getenv("MAX_READ_ROWS", "200"))
+
+        if not mysql_database.strip():
+            raise ValueError("Missing MYSQL_DATABASE environment variable.")
+
         llm_client = NvidiaLLMClient.from_env()
         return cls(
             mysql_host=mysql_host,
@@ -179,6 +202,7 @@ class DatabaseChatbot:
             mysql_password=mysql_password,
             mysql_database=mysql_database,
             llm_client=llm_client,
+            max_read_rows=max_read_rows,
         )
 
     def _connect(self, host: str, port: int, user: str, password: str, database: str):
@@ -196,87 +220,433 @@ class DatabaseChatbot:
         except Error as error:
             raise ConnectionError(f"MySQL connection failed: {error}") from error
 
-    def _load_schema_description(self) -> str:
-        table_definitions: List[str] = []
-        foreign_keys: List[str] = []
+    def _load_schema_metadata(self) -> Dict[str, Any]:
+        schema: Dict[str, Any] = {"tables": {}}
 
-        with self.connection.cursor() as cursor:
-            cursor.execute("SHOW TABLES")
-            tables = [row[0] for row in cursor.fetchall() or []]
-
-            for table in tables:
-                cursor.execute(f"SHOW COLUMNS FROM `{table}`")
-                columns = [f"{column[0]} {column[1]}" for column in cursor.fetchall() or []]
-                table_definitions.append(f"{table}: {', '.join(columns)}")
-
-                # Add sample data for each table
-                cursor.execute(f"SELECT * FROM `{table}` LIMIT 3")
-                sample_rows = cursor.fetchall() or []
-                if sample_rows:
-                    sample_data = []
-                    for row in sample_rows:
-                        row_data = [f"{col}: {val}" for col, val in zip([desc[0] for desc in cursor.description], row)]
-                        sample_data.append(f"  {{{', '.join(row_data)}}}")
-                    table_definitions.append(f"Sample data from {table}:")
-                    table_definitions.extend(sample_data)
-
+        with self.connection.cursor(dictionary=True) as cursor:
             cursor.execute(
-                "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
-                "FROM information_schema.key_column_usage "
-                "WHERE TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME IS NOT NULL",
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                """,
                 (self.mysql_database,),
             )
-            for row in cursor.fetchall() or []:
-                table_definitions.append(
-                    f"Foreign key: {row[0]}.{row[1]} -> {row[2]}.{row[3]}"
-                )
+            tables = [row["table_name"] for row in cursor.fetchall() or []]
 
-        table_definitions.append(
-            "Relationships: product.category_id = product_category.category_id; "
-            "product_sales.product_id = product.product_id"
-        )
-        return "\n".join(table_definitions)
+            for table_name in tables:
+                cursor.execute(
+                    """
+                    SELECT column_name, column_type, is_nullable, column_key, extra
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY ordinal_position
+                    """,
+                    (self.mysql_database, table_name),
+                )
+                column_rows = cursor.fetchall() or []
+
+                columns: Dict[str, Dict[str, Any]] = {}
+                primary_keys: List[str] = []
+                for row in column_rows:
+                    column_name = row["column_name"]
+                    columns[column_name] = {
+                        "type": row["column_type"],
+                        "nullable": str(row["is_nullable"]).upper() == "YES",
+                        "key": row["column_key"],
+                        "extra": row["extra"],
+                    }
+                    if row["column_key"] == "PRI":
+                        primary_keys.append(column_name)
+
+                cursor.execute(
+                    """
+                    SELECT column_name, referenced_table_name, referenced_column_name
+                    FROM information_schema.key_column_usage
+                    WHERE table_schema = %s
+                      AND table_name = %s
+                      AND referenced_table_name IS NOT NULL
+                    ORDER BY column_name
+                    """,
+                    (self.mysql_database, table_name),
+                )
+                foreign_keys = cursor.fetchall() or []
+
+                schema["tables"][table_name] = {
+                    "columns": columns,
+                    "primary_keys": primary_keys,
+                    "foreign_keys": foreign_keys,
+                }
+
+        return schema
+
+    def _build_schema_description(self) -> str:
+        lines: List[str] = []
+        for table_name, table_meta in self.schema["tables"].items():
+            column_parts = []
+            for col_name, col_meta in table_meta["columns"].items():
+                col_desc = f"{col_name} {col_meta['type']}"
+                if col_name in table_meta["primary_keys"]:
+                    col_desc += " [PK]"
+                if col_meta["extra"]:
+                    col_desc += f" [{col_meta['extra']}]"
+                column_parts.append(col_desc)
+
+            lines.append(f"Table {table_name}: {', '.join(column_parts)}")
+
+            if table_meta["foreign_keys"]:
+                fk_parts = []
+                for fk in table_meta["foreign_keys"]:
+                    fk_parts.append(
+                        f"{fk['column_name']} -> {fk['referenced_table_name']}.{fk['referenced_column_name']}"
+                    )
+                lines.append(f"Foreign keys: {', '.join(fk_parts)}")
+
+        if not lines:
+            return "No tables found in the selected database."
+        return "\n".join(lines)
 
     def _build_prompt(self, question: str) -> str:
-        prompt = (
-            "You are a read-only database assistant for a MySQL database. "
-            "Use only the tables and columns available in the schema below. "
-            "Return a single SQL SELECT query that answers the user question. "
-            "Do not use INSERT, UPDATE, DELETE, DROP, CREATE, or any schema changes. "
-            "Use standard MySQL syntax and prefer simple joins when needed. "
-            "Output only the SQL query itself, without explanation or analysis. "
-            "If the question is not a database query, do not return SQL.\n\n"
-            "How to query categories:\n"
-            "- To find products in a category: SELECT p.* FROM product p JOIN product_category c ON p.category_id = c.category_id WHERE c.category_name = 'CategoryName'\n"
-            "- To list all categories: SELECT * FROM product_category\n"
-            "- To find sales for a product: SELECT s.* FROM product_sales s JOIN product p ON s.product_id = p.product_id WHERE p.product_name = 'ProductName'\n\n"
-            "Example queries:\n"
-            "- List all products: SELECT * FROM product\n"
-            "- Products by category: SELECT p.product_name, c.category_name FROM product p JOIN product_category c ON p.category_id = c.category_id\n"
-            "- Sales data: SELECT * FROM product_sales\n"
-            "- Products with sales: SELECT p.product_name, s.quantity_sold, s.sale_date FROM product p JOIN product_sales s ON p.product_id = s.product_id\n\n"
-            f"Database name: {self.mysql_database}\n"
-            "Schema:\n"
-            f"{self.schema_description}\n\n"
-            f"Question: {question}\n"
-            "SQL_QUERY:"
-        )
-        return prompt
+        return f"""You are a MySQL database action planner. Given the schema and user request, output ONLY a valid JSON object with no markdown.
+
+Allowed operations: read, create, update, delete, none
+Rules:
+1) Use only tables and columns from the schema.
+2) If request is not a database task, return operation=none.
+3) For read: include optional select, filters, order_by, limit.
+4) For create: include values object.
+5) For update: include values object and filters array.
+6) For delete: include filters array (never empty).
+7) Keep limit <= {self.max_read_rows}.
+8) Use filter operators only from: =, !=, >, <, >=, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL.
+
+JSON format:
+{{
+  "operation": "read|create|update|delete|none",
+  "table": "table_name_or_empty",
+  "select": ["*" or column names],
+  "values": {{"column": value}},
+  "filters": [{{"column": "col", "operator": "=", "value": 123}}],
+  "order_by": [{{"column": "col", "direction": "asc|desc"}}],
+  "limit": 25,
+  "message": "optional clarification"
+}}
+
+Database: {self.mysql_database}
+Schema:
+{self.schema_description}
+
+User request: {question}
+JSON:"""
 
     @staticmethod
-    def _extract_sql(text: str) -> Optional[str]:
-        pattern = re.compile(r"(?si)(SELECT\b.*?)(?:;|$)")
-        match = pattern.search(text.strip())
-        if not match:
-            return None
-        sql = match.group(1).strip()
-        return sql
+    def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+        text = text.strip()
 
-    def _execute_sql(self, sql: str) -> List[Dict[str, Any]]:
-        with self.connection.cursor(dictionary=True) as cursor:
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-        return rows
+        # Try direct JSON first.
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        # Try fenced block.
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+        if fenced_match:
+            try:
+                parsed = json.loads(fenced_match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        # Try the largest object-shaped substring.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return None
+
+        return None
+
+    @staticmethod
+    def _is_valid_identifier(name: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or ""))
+
+    @staticmethod
+    def _normalize_operation(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _validate_column_exists(self, table_name: str, column_name: str) -> None:
+        if not self._is_valid_identifier(column_name):
+            raise ValueError(f"Invalid column name: {column_name}")
+
+        table_meta = self.schema["tables"][table_name]
+        if column_name not in table_meta["columns"]:
+            raise ValueError(f"Column '{column_name}' does not exist in table '{table_name}'.")
+
+    def _validate_filters(self, table_name: str, filters: Any) -> List[Dict[str, Any]]:
+        if filters is None:
+            return []
+        if not isinstance(filters, list):
+            raise ValueError("filters must be a list.")
+
+        validated: List[Dict[str, Any]] = []
+        for item in filters:
+            if not isinstance(item, dict):
+                raise ValueError("Each filter must be an object.")
+
+            column = str(item.get("column", "")).strip()
+            operator = str(item.get("operator", "")).strip().upper()
+
+            if not column or not operator:
+                raise ValueError("Each filter must include column and operator.")
+
+            self._validate_column_exists(table_name, column)
+
+            if operator not in self.VALID_FILTER_OPERATORS:
+                raise ValueError(f"Unsupported filter operator: {operator}")
+
+            value = item.get("value")
+            if operator == "IN":
+                if not isinstance(value, list) or not value:
+                    raise ValueError("IN operator requires a non-empty list value.")
+            elif operator == "BETWEEN":
+                if not isinstance(value, list) or len(value) != 2:
+                    raise ValueError("BETWEEN operator requires value as [start, end].")
+            elif operator in {"IS NULL", "IS NOT NULL"}:
+                value = None
+            elif "value" not in item:
+                raise ValueError(f"Operator {operator} requires a value.")
+
+            validated.append({"column": column, "operator": operator, "value": value})
+
+        return validated
+
+    def _validate_values(self, table_name: str, values: Any) -> Dict[str, Any]:
+        if not isinstance(values, dict) or not values:
+            raise ValueError("values must be a non-empty object.")
+
+        validated: Dict[str, Any] = {}
+        for column, value in values.items():
+            column_name = str(column).strip()
+            self._validate_column_exists(table_name, column_name)
+            validated[column_name] = value
+
+        return validated
+
+    def _validate_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        operation = self._normalize_operation(action.get("operation"))
+        if operation not in self.VALID_OPERATIONS:
+            raise ValueError(f"Unsupported operation: {operation}")
+
+        if operation == "none":
+            return {
+                "operation": "none",
+                "message": str(action.get("message", "This is not a database action request.")).strip(),
+            }
+
+        table_name = str(action.get("table", "")).strip()
+        if not table_name:
+            raise ValueError("table is required.")
+        if not self._is_valid_identifier(table_name):
+            raise ValueError(f"Invalid table name: {table_name}")
+        if table_name not in self.schema["tables"]:
+            raise ValueError(f"Table '{table_name}' does not exist in database '{self.mysql_database}'.")
+
+        validated: Dict[str, Any] = {
+            "operation": operation,
+            "table": table_name,
+            "message": str(action.get("message", "")).strip(),
+        }
+
+        if operation == "read":
+            select_columns = action.get("select") or ["*"]
+            if isinstance(select_columns, str):
+                select_columns = [select_columns]
+            if not isinstance(select_columns, list) or not select_columns:
+                raise ValueError("select must be a non-empty list.")
+
+            normalized_select = [str(col).strip() for col in select_columns]
+            if "*" in normalized_select and len(normalized_select) > 1:
+                raise ValueError("select cannot combine '*' with named columns.")
+            if normalized_select != ["*"]:
+                for col in normalized_select:
+                    self._validate_column_exists(table_name, col)
+            validated["select"] = normalized_select
+
+            validated["filters"] = self._validate_filters(table_name, action.get("filters"))
+
+            order_by_input = action.get("order_by") or []
+            if not isinstance(order_by_input, list):
+                raise ValueError("order_by must be a list.")
+            order_by: List[Dict[str, str]] = []
+            for item in order_by_input:
+                if not isinstance(item, dict):
+                    raise ValueError("Each order_by item must be an object.")
+                column = str(item.get("column", "")).strip()
+                direction = str(item.get("direction", "asc")).strip().lower()
+                if direction not in {"asc", "desc"}:
+                    raise ValueError("order_by direction must be 'asc' or 'desc'.")
+                self._validate_column_exists(table_name, column)
+                order_by.append({"column": column, "direction": direction})
+            validated["order_by"] = order_by
+
+            try:
+                limit = int(action.get("limit", 25))
+            except (TypeError, ValueError) as error:
+                raise ValueError("limit must be a valid integer.") from error
+
+            validated["limit"] = min(max(1, limit), self.max_read_rows)
+
+        elif operation == "create":
+            validated["values"] = self._validate_values(table_name, action.get("values"))
+
+        elif operation == "update":
+            validated["values"] = self._validate_values(table_name, action.get("values"))
+            validated["filters"] = self._validate_filters(table_name, action.get("filters"))
+            if not validated["filters"]:
+                raise ValueError("update operation requires at least one filter.")
+
+        elif operation == "delete":
+            validated["filters"] = self._validate_filters(table_name, action.get("filters"))
+            if not validated["filters"]:
+                raise ValueError("delete operation requires at least one filter.")
+
+        return validated
+
+    @staticmethod
+    def _build_where_clause(filters: List[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+        if not filters:
+            return "", []
+
+        clauses: List[str] = []
+        params: List[Any] = []
+
+        for item in filters:
+            column = item["column"]
+            operator = item["operator"]
+            value = item.get("value")
+
+            if operator == "IN":
+                placeholders = ", ".join(["%s"] * len(value))
+                clauses.append(f"`{column}` IN ({placeholders})")
+                params.extend(value)
+            elif operator == "BETWEEN":
+                clauses.append(f"`{column}` BETWEEN %s AND %s")
+                params.extend(value)
+            elif operator in {"IS NULL", "IS NOT NULL"}:
+                clauses.append(f"`{column}` {operator}")
+            else:
+                clauses.append(f"`{column}` {operator} %s")
+                params.append(value)
+
+        return " WHERE " + " AND ".join(clauses), params
+
+    def _execute_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        operation = action["operation"]
+
+        if operation == "none":
+            return {
+                "operation": "none",
+                "message": action.get("message") or "This does not require a database operation.",
+            }
+
+        table = action["table"]
+
+        try:
+            with self.connection.cursor(dictionary=True) as cursor:
+                if operation == "read":
+                    select_columns = action["select"]
+                    select_sql = "*" if select_columns == ["*"] else ", ".join(
+                        f"`{column}`" for column in select_columns
+                    )
+
+                    where_sql, where_params = self._build_where_clause(action["filters"])
+
+                    sql = f"SELECT {select_sql} FROM `{table}`{where_sql}"
+
+                    if action["order_by"]:
+                        order_parts = [
+                            f"`{item['column']}` {item['direction'].upper()}"
+                            for item in action["order_by"]
+                        ]
+                        sql += " ORDER BY " + ", ".join(order_parts)
+
+                    sql += " LIMIT %s"
+                    params = where_params + [action["limit"]]
+
+                    cursor.execute(sql, params)
+                    rows = cursor.fetchall() or []
+                    return {
+                        "operation": "read",
+                        "table": table,
+                        "row_count": len(rows),
+                        "rows": rows,
+                    }
+
+                if operation == "create":
+                    values = action["values"]
+                    columns = list(values.keys())
+                    column_sql = ", ".join(f"`{column}`" for column in columns)
+                    placeholders = ", ".join(["%s"] * len(columns))
+                    params = [values[column] for column in columns]
+
+                    sql = f"INSERT INTO `{table}` ({column_sql}) VALUES ({placeholders})"
+                    cursor.execute(sql, params)
+                    self.connection.commit()
+
+                    return {
+                        "operation": "create",
+                        "table": table,
+                        "affected_rows": cursor.rowcount,
+                        "last_insert_id": cursor.lastrowid,
+                    }
+
+                if operation == "update":
+                    values = action["values"]
+                    set_columns = list(values.keys())
+                    set_sql = ", ".join(f"`{column}` = %s" for column in set_columns)
+                    set_params = [values[column] for column in set_columns]
+
+                    where_sql, where_params = self._build_where_clause(action["filters"])
+                    sql = f"UPDATE `{table}` SET {set_sql}{where_sql}"
+                    params = set_params + where_params
+
+                    cursor.execute(sql, params)
+                    self.connection.commit()
+
+                    return {
+                        "operation": "update",
+                        "table": table,
+                        "affected_rows": cursor.rowcount,
+                    }
+
+                if operation == "delete":
+                    where_sql, where_params = self._build_where_clause(action["filters"])
+                    sql = f"DELETE FROM `{table}`{where_sql}"
+
+                    cursor.execute(sql, where_params)
+                    self.connection.commit()
+
+                    return {
+                        "operation": "delete",
+                        "table": table,
+                        "affected_rows": cursor.rowcount,
+                    }
+
+                raise ValueError(f"Unsupported operation at execution time: {operation}")
+
+        except Error as error:
+            self.connection.rollback()
+            raise ValueError(f"Database execution failed: {error}") from error
 
     @staticmethod
     def _is_greeting(question: str) -> bool:
@@ -288,146 +658,78 @@ class DatabaseChatbot:
             )
         )
 
-    @staticmethod
-    def _extract_category_from_question(question: str) -> Optional[str]:
-        normalized = question.lower()
-        patterns = [
-            r"([a-z0-9 ]+) category",
-            r"category ([a-z0-9 ]+)",
-            r"books",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, normalized)
-            if match:
-                category_name = match.group(1).strip() if match.groups() else match.group(0).strip()
-                return category_name.title()
-        return None
+    def _format_result(self, result: Dict[str, Any]) -> str:
+        operation = result.get("operation")
 
-    @staticmethod
-    def _format_results(rows: List[Dict[str, Any]], question: str) -> str:
-        if not rows:
-            category_name = DatabaseChatbot._extract_category_from_question(question)
-            if category_name:
-                return f"No products found in the {category_name} category."
-            if "sale" in question.lower():
-                return "No sales records found for that query."
-            return "No, I could not find any matching records."
+        if operation == "none":
+            return result.get("message") or "This request does not map to a database action."
 
-        if len(rows) == 1:
-            row = rows[0]
-            product_name = row.get("product_name") or row.get("name")
-            category_name = row.get("category_name")
-            price = row.get("product_price") or row.get("price")
-            quantity = row.get("product_count") or row.get("quantity") or row.get("stock")
-            quantity_sold = row.get("quantity_sold")
-            sale_date = row.get("sale_date")
+        if operation == "read":
+            rows = result.get("rows", [])
+            if not rows:
+                return "No matching records found."
 
-            if product_name:
-                parts = []
-                if category_name:
-                    parts.append(f"in {category_name} category")
-                if price is not None:
-                    parts.append(f"price is {price}")
-                if quantity is not None:
-                    parts.append(f"quantity is {quantity}")
-                if quantity_sold is not None:
-                    parts.append(f"sold {quantity_sold}")
-                if sale_date:
-                    parts.append(f"sold on {sale_date}")
+            preview_size = min(20, len(rows))
+            preview = rows[:preview_size]
+            json_preview = json.dumps(preview, indent=2, default=str)
 
-                if parts:
-                    return f"Yes, I have {product_name}. {' '.join(parts)}."
-                return f"Yes, I have {product_name}."
+            if len(rows) > preview_size:
+                return (
+                    f"Found {len(rows)} records (showing first {preview_size}):\n"
+                    f"{json_preview}"
+                )
 
-            # For non-product queries, show key fields
-            field_text = []
-            for key, value in row.items():
-                if key not in ['id', 'category_id', 'product_id']:
-                    field_text.append(f"{key.replace('_', ' ')} {value}")
-            if field_text:
-                return "Found one record: " + ", ".join(field_text) + "."
+            return f"Found {len(rows)} record(s):\n{json_preview}"
 
-        # Multiple records
-        sample_info = []
-        for row in rows[:5]:
-            info_parts = []
-            product_name = row.get("product_name") or row.get("name")
-            category_name = row.get("category_name")
-            price = row.get("product_price") or row.get("price")
+        if operation == "create":
+            return (
+                f"Created record in table '{result.get('table')}'. "
+                f"Affected rows: {result.get('affected_rows', 0)}. "
+                f"Last insert id: {result.get('last_insert_id')}."
+            )
 
-            if product_name:
-                info_parts.append(product_name)
-            if category_name:
-                info_parts.append(f"({category_name})")
-            if price is not None:
-                info_parts.append(f"₹{price}")
+        if operation == "update":
+            return (
+                f"Updated table '{result.get('table')}'. "
+                f"Affected rows: {result.get('affected_rows', 0)}."
+            )
 
-            if info_parts:
-                sample_info.append(" ".join(info_parts))
-            else:
-                # Fallback for other types of records
-                key_values = [f"{k}={v}" for k, v in list(row.items())[:3]]
-                sample_info.append(", ".join(key_values))
+        if operation == "delete":
+            return (
+                f"Deleted from table '{result.get('table')}'. "
+                f"Affected rows: {result.get('affected_rows', 0)}."
+            )
 
-        if sample_info:
-            summary = "; ".join(sample_info)
-            if len(rows) <= 5:
-                return f"Found {len(rows)} matching records: {summary}."
-            return f"Found {len(rows)} matching records. Examples: {summary}."
-
-        return f"Found {len(rows)} matching records."
+        return "Operation completed."
 
     def answer_question(self, question: str) -> str:
         if self._is_greeting(question):
             return (
-                "Hello! I can answer questions about the product_demo_db database. "
-                "Ask me about products, categories, or sales."
+                f"Hello! I can perform CRUD operations on any table in '{self.mysql_database}'. "
+                "Ask me to create, read, update, or delete data."
             )
 
         prompt = self._build_prompt(question)
         model_output = self.llm_client.complete(prompt)
 
-        sql = self._extract_sql(model_output)
-        if not sql:
+        action = self._extract_json(model_output)
+        if not action:
             raise ValueError(
-                "The NVIDIA LLM response did not contain a valid SELECT query. "
-                "You can inspect the raw response for debugging."
+                "The LLM response did not contain valid JSON action output. "
+                "Enable debug logging and inspect raw model output."
             )
 
-        # Debug: print the SQL query
-        print(f"DEBUG SQL: {sql}")
-
-        rows = self._execute_sql(sql)
-        return self._format_results(rows, question)
+        validated_action = self._validate_action(action)
+        result = self._execute_action(validated_action)
+        return self._format_result(result)
 
     def show_available_data(self) -> str:
-        """Show what categories and products exist in the database."""
+        lines: List[str] = [f"Database: {self.mysql_database}", "Tables and row counts:"]
+
         with self.connection.cursor(dictionary=True) as cursor:
-            # Get categories
-            cursor.execute("SELECT category_name FROM product_category")
-            categories = [row['category_name'] for row in cursor.fetchall()]
+            for table_name in self.schema["tables"].keys():
+                cursor.execute(f"SELECT COUNT(*) AS total_rows FROM `{table_name}`")
+                count = (cursor.fetchone() or {}).get("total_rows", 0)
+                lines.append(f"- {table_name}: {count}")
 
-            # Get products with categories
-            cursor.execute("""
-                SELECT p.product_name, c.category_name, p.product_price
-                FROM product p
-                JOIN product_category c ON p.category_id = c.category_id
-                ORDER BY c.category_name, p.product_name
-            """)
-            products = cursor.fetchall()
-
-            # Get sales data
-            cursor.execute("SELECT COUNT(*) as total_sales FROM product_sales")
-            sales_count = cursor.fetchone()['total_sales']
-
-        result = f"Available categories: {', '.join(categories)}\n\n"
-        result += "Products by category:\n"
-        current_category = None
-        for product in products:
-            if product['category_name'] != current_category:
-                current_category = product['category_name']
-                result += f"\n{current_category}:\n"
-            result += f"  - {product['product_name']} (₹{product['product_price']})\n"
-
-        result += f"\nTotal sales records: {sales_count}"
-        return result
+        return "\n".join(lines)
