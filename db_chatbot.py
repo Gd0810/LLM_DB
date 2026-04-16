@@ -208,6 +208,7 @@ class DatabaseChatbot:
             password=mysql_password,
             database=mysql_database,
         )
+        self._reference_label_cache: Dict[Tuple[str, str, Any], Optional[Any]] = {}
         self.schema = self._load_schema_metadata()
         self.schema_description = self._build_schema_description()
 
@@ -430,6 +431,13 @@ JSON:"""
             terms.append(term)
         return terms
 
+    def _clean_category_phrase(self, phrase: str) -> str:
+        tokens = re.findall(r"[a-z0-9]+", (phrase or "").lower())
+        cleaned = [token for token in tokens if token not in self.SEARCH_STOPWORDS]
+        if cleaned:
+            return " ".join(cleaned)
+        return " ".join(tokens).strip()
+
     def _fallback_read_search(self, question: str, limit: int = 20) -> Optional[Dict[str, Any]]:
         terms = self._extract_search_terms(question)
         if not terms:
@@ -497,6 +505,79 @@ JSON:"""
             "row_count": len(table_rows),
             "rows": table_rows[:limit],
         }
+
+    def _try_category_products_query(self, question: str) -> Optional[Dict[str, Any]]:
+        normalized = question.strip().lower()
+
+        category_id_match = re.search(r"\bcategory\s*id\s*(?:is|=)?\s*(\d+)\b", normalized)
+        category_name_match = re.search(r"\b([a-z0-9 ]+?)\s+category\s+products?\b", normalized)
+        if not category_name_match:
+            category_name_match = re.search(r"\bproducts?\s+in\s+([a-z0-9 ]+?)\s+category\b", normalized)
+
+        category_tables = [
+            table_name
+            for table_name, meta in self.schema["tables"].items()
+            if "category_id" in meta["columns"] and "category_name" in meta["columns"]
+        ]
+        product_tables = [
+            table_name
+            for table_name, meta in self.schema["tables"].items()
+            if "category_id" in meta["columns"]
+            and any(candidate in meta["columns"] for candidate in ("product_name", "name", "title"))
+        ]
+
+        if not category_tables or not product_tables:
+            return None
+
+        category_table = category_tables[0]
+        product_table = product_tables[0]
+
+        with self.connection.cursor(dictionary=True) as cursor:
+            if category_id_match:
+                category_id = int(category_id_match.group(1))
+                sql = (
+                    f"SELECT p.*, c.category_name "
+                    f"FROM `{product_table}` p "
+                    f"JOIN `{category_table}` c ON p.category_id = c.category_id "
+                    f"WHERE p.category_id = %s "
+                    f"LIMIT %s"
+                )
+                cursor.execute(sql, (category_id, min(50, self.max_read_rows)))
+                rows = cursor.fetchall() or []
+                for row in rows:
+                    row["__table"] = product_table
+                return {
+                    "operation": "read",
+                    "table": product_table,
+                    "row_count": len(rows),
+                    "rows": rows,
+                }
+
+            if category_name_match:
+                category_name = self._clean_category_phrase(category_name_match.group(1))
+                if category_name:
+                    sql = (
+                        f"SELECT p.*, c.category_name "
+                        f"FROM `{product_table}` p "
+                        f"JOIN `{category_table}` c ON p.category_id = c.category_id "
+                        f"WHERE LOWER(c.category_name) LIKE %s "
+                        f"LIMIT %s"
+                    )
+                    cursor.execute(
+                        sql,
+                        (f"%{category_name.lower()}%", min(50, self.max_read_rows)),
+                    )
+                    rows = cursor.fetchall() or []
+                    for row in rows:
+                        row["__table"] = product_table
+                    return {
+                        "operation": "read",
+                        "table": product_table,
+                        "row_count": len(rows),
+                        "rows": rows,
+                    }
+
+        return None
 
     def _validate_column_exists(self, table_name: str, column_name: str) -> None:
         if not self._is_valid_identifier(column_name):
@@ -809,6 +890,84 @@ JSON:"""
             )
         )
 
+    def _pick_display_column(self, table_name: str) -> Optional[str]:
+        table_meta = self.schema["tables"].get(table_name, {})
+        columns = list((table_meta.get("columns") or {}).keys())
+        if not columns:
+            return None
+
+        preferred_exact = {"name", "title", "label"}
+        preferred_suffix = ("_name", "_title", "_label")
+        preferred_contains = ("name", "title", "label")
+
+        for column in columns:
+            if column.lower() in preferred_exact:
+                return column
+        for column in columns:
+            if column.lower().endswith(preferred_suffix):
+                return column
+        for column in columns:
+            if any(token in column.lower() for token in preferred_contains):
+                return column
+
+        non_id_columns = [column for column in columns if not column.lower().endswith("_id")]
+        if non_id_columns:
+            return non_id_columns[0]
+        return columns[0]
+
+    def _lookup_reference_label(
+        self,
+        referenced_table: str,
+        referenced_column: str,
+        referenced_value: Any,
+    ) -> Optional[Any]:
+        cache_key = (referenced_table, referenced_column, referenced_value)
+        if cache_key in self._reference_label_cache:
+            return self._reference_label_cache[cache_key]
+
+        if referenced_value is None:
+            return None
+        if referenced_table not in self.schema["tables"]:
+            return None
+        if referenced_column not in self.schema["tables"][referenced_table]["columns"]:
+            return None
+
+        display_column = self._pick_display_column(referenced_table)
+        if not display_column:
+            return None
+
+        with self.connection.cursor(dictionary=True) as cursor:
+            sql = (
+                f"SELECT `{display_column}` AS display_value "
+                f"FROM `{referenced_table}` "
+                f"WHERE `{referenced_column}` = %s "
+                f"LIMIT 1"
+            )
+            cursor.execute(sql, (referenced_value,))
+            row = cursor.fetchone() or {}
+
+        label = row.get("display_value")
+        self._reference_label_cache[cache_key] = label
+        return label
+
+    def _resolve_id_to_label(self, table_name: Optional[str], column_name: str, value: Any) -> Optional[Any]:
+        if not table_name or table_name not in self.schema["tables"]:
+            return None
+        if value is None:
+            return None
+
+        foreign_keys = self.schema["tables"][table_name].get("foreign_keys") or []
+        for fk in foreign_keys:
+            if fk.get("column_name") != column_name:
+                continue
+            referenced_table = fk.get("referenced_table_name")
+            referenced_column = fk.get("referenced_column_name")
+            if not referenced_table or not referenced_column:
+                continue
+            return self._lookup_reference_label(referenced_table, referenced_column, value)
+
+        return None
+
     def _format_result(self, result: Dict[str, Any]) -> str:
         operation = result.get("operation")
 
@@ -826,10 +985,20 @@ JSON:"""
 
             for index, row in enumerate(preview, start=1):
                 parts: List[str] = []
+                row_table = row.get("__table") or result.get("table")
                 for key, value in row.items():
                     if key == "__table":
                         continue
-                    parts.append(f"{key.replace('_', ' ')}: {value}")
+
+                    display_key = key.replace("_", " ")
+                    display_value = value
+                    if key.endswith("_id"):
+                        resolved_label = self._resolve_id_to_label(row_table, key, value)
+                        if resolved_label is not None:
+                            display_key = key[:-3].replace("_", " ")
+                            display_value = resolved_label
+
+                    parts.append(f"{display_key}: {display_value}")
 
                 table_name = row.get("__table")
                 if table_name:
@@ -872,6 +1041,12 @@ JSON:"""
                 "Ask me to create, read, update, or delete data."
             )
 
+        category_result = self._try_category_products_query(question)
+        if category_result is not None:
+            if category_result.get("rows"):
+                return self._format_result(category_result)
+            return "No products found for that category."
+
         prompt = self._build_prompt(question)
         model_output = self.llm_client.complete(prompt)
 
@@ -882,8 +1057,14 @@ JSON:"""
                 "Enable debug logging and inspect raw model output."
             )
 
-        validated_action = self._validate_action(action)
-        result = self._execute_action(validated_action)
+        try:
+            validated_action = self._validate_action(action)
+            result = self._execute_action(validated_action)
+        except Exception:
+            fallback = self._fallback_read_search(question)
+            if fallback:
+                return self._format_result(fallback)
+            raise
 
         if result.get("operation") == "none":
             fallback = self._fallback_read_search(question)
