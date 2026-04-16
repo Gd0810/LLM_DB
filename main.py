@@ -11,7 +11,7 @@ def main() -> None:
         print("Configuration error:", error)
         return
 
-    print("Database chatbot is ready. Ask questions about product_demo_db.")
+    print(f"Database chatbot is ready. Ask questions about {chatbot.mysql_database}.")
     print("Type 'exit' or 'quit' to stop.\n")
 
     try:

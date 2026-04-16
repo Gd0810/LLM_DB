@@ -159,6 +159,34 @@ class DatabaseChatbot:
         "IS NOT NULL",
     }
     AGGREGATE_FUNCTIONS = {"SUM", "COUNT", "AVG", "MIN", "MAX"}
+    SEARCH_STOPWORDS = {
+        "a",
+        "an",
+        "and",
+        "any",
+        "by",
+        "for",
+        "from",
+        "get",
+        "give",
+        "in",
+        "list",
+        "me",
+        "of",
+        "overall",
+        "please",
+        "product",
+        "products",
+        "show",
+        "tell",
+        "the",
+        "to",
+        "with",
+        "price",
+        "amount",
+        "category",
+        "categories",
+    }
 
     def __init__(
         self,
@@ -314,7 +342,7 @@ class DatabaseChatbot:
 Allowed operations: read, create, update, delete, none
 Rules:
 1) Use only tables and columns from the schema.
-2) If request is not a database task, return operation=none.
+2) If request is not a database task, return operation=none. Short noun phrases (example: "book", "iphone 14 price") are still database read requests.
 3) For read: include optional select, filters, order_by, limit. Aggregate expressions are allowed in select.
 4) For create: include values object.
 5) For update: include values object and filters array.
@@ -384,6 +412,91 @@ JSON:"""
     @staticmethod
     def _normalize_operation(value: Any) -> str:
         return str(value or "").strip().lower()
+
+    @staticmethod
+    def _is_text_column_type(column_type: str) -> bool:
+        normalized = str(column_type or "").lower()
+        text_markers = ("char", "text", "enum", "set", "json")
+        return any(marker in normalized for marker in text_markers)
+
+    def _extract_search_terms(self, question: str) -> List[str]:
+        raw_terms = re.findall(r"[a-z0-9]+", question.lower())
+        terms: List[str] = []
+        for term in raw_terms:
+            if len(term) < 2:
+                continue
+            if term in self.SEARCH_STOPWORDS:
+                continue
+            terms.append(term)
+        return terms
+
+    def _fallback_read_search(self, question: str, limit: int = 20) -> Optional[Dict[str, Any]]:
+        terms = self._extract_search_terms(question)
+        if not terms:
+            return None
+
+        table_rows: List[Dict[str, Any]] = []
+        remaining = min(max(1, limit), self.max_read_rows)
+
+        search_modes = ("AND", "OR")
+        with self.connection.cursor(dictionary=True) as cursor:
+            for mode in search_modes:
+                if remaining <= 0:
+                    break
+
+                for table_name, table_meta in self.schema["tables"].items():
+                    if remaining <= 0:
+                        break
+
+                    text_columns = [
+                        column_name
+                        for column_name, column_meta in table_meta["columns"].items()
+                        if self._is_text_column_type(column_meta.get("type", ""))
+                    ]
+                    if not text_columns:
+                        continue
+
+                    term_clauses: List[str] = []
+                    params: List[Any] = []
+                    for term in terms:
+                        per_term_clauses = []
+                        normalized_term = f"%{term.replace(' ', '')}%"
+                        for column in text_columns:
+                            per_term_clauses.append(
+                                f"LOWER(REPLACE(CAST(`{column}` AS CHAR), ' ', '')) LIKE %s"
+                            )
+                            params.append(normalized_term)
+
+                        connector = " OR "
+                        term_clauses.append("(" + connector.join(per_term_clauses) + ")")
+
+                    if not term_clauses:
+                        continue
+
+                    where_connector = " AND " if mode == "AND" else " OR "
+                    where_sql = where_connector.join(term_clauses)
+                    sql = f"SELECT * FROM `{table_name}` WHERE {where_sql} LIMIT %s"
+                    query_params = params + [remaining]
+
+                    cursor.execute(sql, query_params)
+                    rows = cursor.fetchall() or []
+                    for row in rows:
+                        row["__table"] = table_name
+                    table_rows.extend(rows)
+                    remaining = max(0, limit - len(table_rows))
+
+                if table_rows:
+                    break
+
+        if not table_rows:
+            return None
+
+        return {
+            "operation": "read",
+            "table": "multi_table_fallback",
+            "row_count": len(table_rows),
+            "rows": table_rows[:limit],
+        }
 
     def _validate_column_exists(self, table_name: str, column_name: str) -> None:
         if not self._is_valid_identifier(column_name):
@@ -759,6 +872,17 @@ JSON:"""
 
         validated_action = self._validate_action(action)
         result = self._execute_action(validated_action)
+
+        if result.get("operation") == "none":
+            fallback = self._fallback_read_search(question)
+            if fallback:
+                return self._format_result(fallback)
+
+        if result.get("operation") == "read" and not result.get("rows"):
+            fallback = self._fallback_read_search(question)
+            if fallback:
+                return self._format_result(fallback)
+
         return self._format_result(result)
 
     def show_available_data(self) -> str:
@@ -771,3 +895,24 @@ JSON:"""
                 lines.append(f"- {table_name}: {count}")
 
         return "\n".join(lines)
+
+    def list_tables(self) -> List[str]:
+        return list(self.schema["tables"].keys())
+
+    def get_table_data(self, table_name: str, limit: int = 100) -> List[Dict[str, Any]]:
+        table = str(table_name).strip()
+        if not table:
+            raise ValueError("table_name is required.")
+        if not self._is_valid_identifier(table):
+            raise ValueError(f"Invalid table name: {table}")
+        if table not in self.schema["tables"]:
+            raise ValueError(f"Table '{table}' does not exist in database '{self.mysql_database}'.")
+
+        safe_limit = min(max(1, int(limit)), self.max_read_rows)
+        with self.connection.cursor(dictionary=True) as cursor:
+            cursor.execute(f"SELECT * FROM `{table}` LIMIT %s", (safe_limit,))
+            return cursor.fetchall() or []
+
+    def close(self) -> None:
+        if getattr(self, "connection", None) and self.connection.is_connected():
+            self.connection.close()
