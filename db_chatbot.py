@@ -158,6 +158,7 @@ class DatabaseChatbot:
         "IS NULL",
         "IS NOT NULL",
     }
+    AGGREGATE_FUNCTIONS = {"SUM", "COUNT", "AVG", "MIN", "MAX"}
 
     def __init__(
         self,
@@ -314,7 +315,7 @@ Allowed operations: read, create, update, delete, none
 Rules:
 1) Use only tables and columns from the schema.
 2) If request is not a database task, return operation=none.
-3) For read: include optional select, filters, order_by, limit.
+3) For read: include optional select, filters, order_by, limit. Aggregate expressions are allowed in select.
 4) For create: include values object.
 5) For update: include values object and filters array.
 6) For delete: include filters array (never empty).
@@ -325,7 +326,7 @@ JSON format:
 {{
   "operation": "read|create|update|delete|none",
   "table": "table_name_or_empty",
-  "select": ["*" or column names],
+  "select": ["*" or column names or aggregate expressions like "SUM(amount) AS total_amount"],
   "values": {{"column": value}},
   "filters": [{{"column": "col", "operator": "=", "value": 123}}],
   "order_by": [{{"column": "col", "direction": "asc|desc"}}],
@@ -391,6 +392,45 @@ JSON:"""
         table_meta = self.schema["tables"][table_name]
         if column_name not in table_meta["columns"]:
             raise ValueError(f"Column '{column_name}' does not exist in table '{table_name}'.")
+
+    def _parse_select_item(self, table_name: str, select_item: str) -> Dict[str, str]:
+        item = str(select_item or "").strip()
+        if not item:
+            raise ValueError("select item cannot be empty.")
+
+        if item == "*":
+            return {"kind": "all", "sql": "*"}
+
+        if self._is_valid_identifier(item):
+            self._validate_column_exists(table_name, item)
+            return {"kind": "column", "sql": f"`{item}`", "column": item}
+
+        aggregate_match = re.fullmatch(
+            r"(?is)(SUM|COUNT|AVG|MIN|MAX)\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)(?:\s+AS\s+([A-Za-z_][A-Za-z0-9_]*))?",
+            item,
+        )
+        if aggregate_match:
+            function_name = aggregate_match.group(1).upper()
+            column_name = aggregate_match.group(2)
+            alias = aggregate_match.group(3)
+
+            if function_name not in self.AGGREGATE_FUNCTIONS:
+                raise ValueError(f"Unsupported aggregate function: {function_name}")
+
+            self._validate_column_exists(table_name, column_name)
+            sql = f"{function_name}(`{column_name}`)"
+            if alias:
+                sql += f" AS `{alias}`"
+
+            return {
+                "kind": "aggregate",
+                "sql": sql,
+                "function": function_name,
+                "column": column_name,
+                "alias": alias or "",
+            }
+
+        raise ValueError(f"Invalid select expression: {item}")
 
     def _validate_filters(self, table_name: str, filters: Any) -> List[Dict[str, Any]]:
         if filters is None:
@@ -477,10 +517,10 @@ JSON:"""
             normalized_select = [str(col).strip() for col in select_columns]
             if "*" in normalized_select and len(normalized_select) > 1:
                 raise ValueError("select cannot combine '*' with named columns.")
-            if normalized_select != ["*"]:
-                for col in normalized_select:
-                    self._validate_column_exists(table_name, col)
-            validated["select"] = normalized_select
+            validated["select"] = [
+                self._parse_select_item(table_name, select_item)
+                for select_item in normalized_select
+            ]
 
             validated["filters"] = self._validate_filters(table_name, action.get("filters"))
 
@@ -564,10 +604,8 @@ JSON:"""
         try:
             with self.connection.cursor(dictionary=True) as cursor:
                 if operation == "read":
-                    select_columns = action["select"]
-                    select_sql = "*" if select_columns == ["*"] else ", ".join(
-                        f"`{column}`" for column in select_columns
-                    )
+                    select_items = action["select"]
+                    select_sql = ", ".join(item["sql"] for item in select_items)
 
                     where_sql, where_params = self._build_where_clause(action["filters"])
 
