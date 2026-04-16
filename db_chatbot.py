@@ -144,7 +144,7 @@ class NvidiaLLMClient:
 
 
 class DatabaseChatbot:
-    VALID_OPERATIONS = {"read", "create", "update", "delete", "none"}
+    VALID_OPERATIONS = {"read", "read_sql", "create", "update", "delete", "none"}
     VALID_FILTER_OPERATORS = {
         "=",
         "!=",
@@ -340,26 +340,30 @@ class DatabaseChatbot:
     def _build_prompt(self, question: str) -> str:
         return f"""You are a MySQL database action planner. Given the schema and user request, output ONLY a valid JSON object with no markdown.
 
-Allowed operations: read, create, update, delete, none
+Allowed operations: read, read_sql, create, update, delete, none
 Rules:
 1) Use only tables and columns from the schema.
-2) If request is not a database task, return operation=none. Short noun phrases (example: "book", "iphone 14 price") are still database read requests.
+2) If request is not a database task, return operation=none.
 3) For read: include optional select, filters, order_by, limit. Aggregate expressions are allowed in select.
-4) For create: include values object.
-5) For update: include values object and filters array.
-6) For delete: include filters array (never empty).
-7) Keep limit <= {self.max_read_rows}.
-8) Use filter operators only from: =, !=, >, <, >=, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL.
+4) Use operation=read_sql when join/aggregation/subquery is needed (for example filtering sales by product name from another table).
+5) For read_sql, sql must be a single SELECT statement only, with no markdown.
+6) For create: include values object.
+7) For update: include values object and filters array.
+8) For delete: include filters array (never empty).
+9) Keep read limit <= {self.max_read_rows} when possible.
+10) Use filter operators only from: =, !=, >, <, >=, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL.
+11) If user asks sum/total/count/avg/min/max, return aggregated result (not raw rows).
 
 JSON format:
 {{
-  "operation": "read|create|update|delete|none",
+  "operation": "read|read_sql|create|update|delete|none",
   "table": "table_name_or_empty",
   "select": ["*" or column names or aggregate expressions like "SUM(amount) AS total_amount"],
   "values": {{"column": value}},
   "filters": [{{"column": "col", "operator": "=", "value": 123}}],
   "order_by": [{{"column": "col", "direction": "asc|desc"}}],
   "limit": 25,
+  "sql": "single SELECT statement when operation is read_sql",
   "message": "optional clarification"
 }}
 
@@ -368,6 +372,32 @@ Schema:
 {self.schema_description}
 
 User request: {question}
+JSON:"""
+
+    def _build_repair_prompt(self, question: str, previous_action: Dict[str, Any], error_text: str) -> str:
+        previous_json = json.dumps(previous_action, ensure_ascii=True)
+        return f"""The previous database action failed or did not satisfy the request.
+Return ONLY a corrected JSON object.
+
+Original user request:
+{question}
+
+Previous action JSON:
+{previous_json}
+
+Issue:
+{error_text}
+
+Constraints:
+- Allowed operations: read, read_sql, create, update, delete, none
+- Use operation=read_sql for joins/aggregates when needed
+- read_sql must be a single SELECT statement only
+- If user asked for sum/total/count/avg/min/max, return aggregated output
+- Use schema below only
+
+Schema:
+{self.schema_description}
+
 JSON:"""
 
     @staticmethod
@@ -406,6 +436,33 @@ JSON:"""
 
         return None
 
+    def _plan_action(self, question: str, repair_error: str = "", previous_action: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if repair_error and previous_action is not None:
+            prompt = self._build_repair_prompt(question, previous_action, repair_error)
+        else:
+            prompt = self._build_prompt(question)
+        model_output = self.llm_client.complete(prompt)
+        action = self._extract_json(model_output)
+        if not action:
+            raise ValueError("The LLM response did not contain valid JSON action output.")
+        return action
+
+    @staticmethod
+    def _validate_read_sql(sql: Any) -> str:
+        sql_text = str(sql or "").strip()
+        if not sql_text:
+            raise ValueError("read_sql operation requires sql.")
+        if ";" in sql_text.rstrip(";"):
+            raise ValueError("read_sql must contain only one SQL statement.")
+        normalized = re.sub(r"\s+", " ", sql_text).strip().lower()
+        if not normalized.startswith("select "):
+            raise ValueError("read_sql only allows SELECT statements.")
+        blocked = (" insert ", " update ", " delete ", " drop ", " alter ", " create ", " truncate ", " grant ", " revoke ")
+        padded = f" {normalized} "
+        if any(token in padded for token in blocked):
+            raise ValueError("read_sql contains blocked SQL keywords.")
+        return sql_text
+
     @staticmethod
     def _is_valid_identifier(name: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or ""))
@@ -431,12 +488,6 @@ JSON:"""
             terms.append(term)
         return terms
 
-    def _clean_category_phrase(self, phrase: str) -> str:
-        tokens = re.findall(r"[a-z0-9]+", (phrase or "").lower())
-        cleaned = [token for token in tokens if token not in self.SEARCH_STOPWORDS]
-        if cleaned:
-            return " ".join(cleaned)
-        return " ".join(tokens).strip()
 
     def _fallback_read_search(self, question: str, limit: int = 20) -> Optional[Dict[str, Any]]:
         terms = self._extract_search_terms(question)
@@ -505,79 +556,6 @@ JSON:"""
             "row_count": len(table_rows),
             "rows": table_rows[:limit],
         }
-
-    def _try_category_products_query(self, question: str) -> Optional[Dict[str, Any]]:
-        normalized = question.strip().lower()
-
-        category_id_match = re.search(r"\bcategory\s*id\s*(?:is|=)?\s*(\d+)\b", normalized)
-        category_name_match = re.search(r"\b([a-z0-9 ]+?)\s+category\s+products?\b", normalized)
-        if not category_name_match:
-            category_name_match = re.search(r"\bproducts?\s+in\s+([a-z0-9 ]+?)\s+category\b", normalized)
-
-        category_tables = [
-            table_name
-            for table_name, meta in self.schema["tables"].items()
-            if "category_id" in meta["columns"] and "category_name" in meta["columns"]
-        ]
-        product_tables = [
-            table_name
-            for table_name, meta in self.schema["tables"].items()
-            if "category_id" in meta["columns"]
-            and any(candidate in meta["columns"] for candidate in ("product_name", "name", "title"))
-        ]
-
-        if not category_tables or not product_tables:
-            return None
-
-        category_table = category_tables[0]
-        product_table = product_tables[0]
-
-        with self.connection.cursor(dictionary=True) as cursor:
-            if category_id_match:
-                category_id = int(category_id_match.group(1))
-                sql = (
-                    f"SELECT p.*, c.category_name "
-                    f"FROM `{product_table}` p "
-                    f"JOIN `{category_table}` c ON p.category_id = c.category_id "
-                    f"WHERE p.category_id = %s "
-                    f"LIMIT %s"
-                )
-                cursor.execute(sql, (category_id, min(50, self.max_read_rows)))
-                rows = cursor.fetchall() or []
-                for row in rows:
-                    row["__table"] = product_table
-                return {
-                    "operation": "read",
-                    "table": product_table,
-                    "row_count": len(rows),
-                    "rows": rows,
-                }
-
-            if category_name_match:
-                category_name = self._clean_category_phrase(category_name_match.group(1))
-                if category_name:
-                    sql = (
-                        f"SELECT p.*, c.category_name "
-                        f"FROM `{product_table}` p "
-                        f"JOIN `{category_table}` c ON p.category_id = c.category_id "
-                        f"WHERE LOWER(c.category_name) LIKE %s "
-                        f"LIMIT %s"
-                    )
-                    cursor.execute(
-                        sql,
-                        (f"%{category_name.lower()}%", min(50, self.max_read_rows)),
-                    )
-                    rows = cursor.fetchall() or []
-                    for row in rows:
-                        row["__table"] = product_table
-                    return {
-                        "operation": "read",
-                        "table": product_table,
-                        "row_count": len(rows),
-                        "rows": rows,
-                    }
-
-        return None
 
     def _validate_column_exists(self, table_name: str, column_name: str) -> None:
         if not self._is_valid_identifier(column_name):
@@ -687,6 +665,13 @@ JSON:"""
                 "message": str(action.get("message", "This is not a database action request.")).strip(),
             }
 
+        if operation == "read_sql":
+            return {
+                "operation": "read_sql",
+                "sql": self._validate_read_sql(action.get("sql")),
+                "message": str(action.get("message", "")).strip(),
+            }
+
         table_name = str(action.get("table", "")).strip()
         if not table_name:
             raise ValueError("table is required.")
@@ -791,6 +776,18 @@ JSON:"""
             return {
                 "operation": "none",
                 "message": action.get("message") or "This does not require a database operation.",
+            }
+
+        if operation == "read_sql":
+            sql = action["sql"]
+            with self.connection.cursor(dictionary=True) as cursor:
+                cursor.execute(sql)
+                rows = cursor.fetchall() or []
+            return {
+                "operation": "read",
+                "table": "custom_query",
+                "row_count": len(rows),
+                "rows": rows,
             }
 
         table = action["table"]
@@ -1040,43 +1037,52 @@ JSON:"""
                 f"Hello! I can perform CRUD operations on any table in '{self.mysql_database}'. "
                 "Ask me to create, read, update, or delete data."
             )
-
-        category_result = self._try_category_products_query(question)
-        if category_result is not None:
-            if category_result.get("rows"):
-                return self._format_result(category_result)
-            return "No products found for that category."
-
-        prompt = self._build_prompt(question)
-        model_output = self.llm_client.complete(prompt)
-
-        action = self._extract_json(model_output)
-        if not action:
-            raise ValueError(
-                "The LLM response did not contain valid JSON action output. "
-                "Enable debug logging and inspect raw model output."
-            )
+        first_action = self._plan_action(question)
 
         try:
-            validated_action = self._validate_action(action)
-            result = self._execute_action(validated_action)
-        except Exception:
+            first_validated = self._validate_action(first_action)
+            first_result = self._execute_action(first_validated)
+        except Exception as error:
+            repair_action = self._plan_action(
+                question,
+                repair_error=str(error),
+                previous_action=first_action,
+            )
+            try:
+                repair_validated = self._validate_action(repair_action)
+                repair_result = self._execute_action(repair_validated)
+                return self._format_result(repair_result)
+            except Exception:
+                fallback = self._fallback_read_search(question)
+                if fallback:
+                    return self._format_result(fallback)
+                raise
+
+        if first_result.get("operation") == "none":
             fallback = self._fallback_read_search(question)
             if fallback:
                 return self._format_result(fallback)
-            raise
+            return self._format_result(first_result)
 
-        if result.get("operation") == "none":
+        if first_result.get("operation") == "read" and not first_result.get("rows"):
+            repair_action = self._plan_action(
+                question,
+                repair_error="First result returned 0 rows. Re-plan with joins/aggregations if needed.",
+                previous_action=first_action,
+            )
+            try:
+                repair_validated = self._validate_action(repair_action)
+                repair_result = self._execute_action(repair_validated)
+                if repair_result.get("operation") == "read" and repair_result.get("rows"):
+                    return self._format_result(repair_result)
+            except Exception:
+                pass
+
             fallback = self._fallback_read_search(question)
             if fallback:
                 return self._format_result(fallback)
 
-        if result.get("operation") == "read" and not result.get("rows"):
-            fallback = self._fallback_read_search(question)
-            if fallback:
-                return self._format_result(fallback)
-
-        return self._format_result(result)
+        return self._format_result(first_result)
 
     def show_available_data(self) -> str:
         lines: List[str] = [f"Database: {self.mysql_database}", "Tables and row counts:"]
