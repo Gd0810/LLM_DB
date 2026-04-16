@@ -822,15 +822,27 @@ JSON:"""
 
             preview_size = min(20, len(rows))
             preview = rows[:preview_size]
-            json_preview = json.dumps(preview, indent=2, default=str)
+            lines: List[str] = []
 
+            for index, row in enumerate(preview, start=1):
+                parts: List[str] = []
+                for key, value in row.items():
+                    if key == "__table":
+                        continue
+                    parts.append(f"{key.replace('_', ' ')}: {value}")
+
+                table_name = row.get("__table")
+                if table_name:
+                    parts.append(f"table: {table_name}")
+
+                line_text = ", ".join(parts) if parts else "no fields"
+                lines.append(f"{index}. {line_text}")
+
+            header = f"Found {len(rows)} record(s):"
             if len(rows) > preview_size:
-                return (
-                    f"Found {len(rows)} records (showing first {preview_size}):\n"
-                    f"{json_preview}"
-                )
+                header = f"Found {len(rows)} records (showing first {preview_size}):"
 
-            return f"Found {len(rows)} record(s):\n{json_preview}"
+            return header + "\n" + "\n".join(lines)
 
         if operation == "create":
             return (
