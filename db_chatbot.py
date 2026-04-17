@@ -353,6 +353,10 @@ Rules:
 9) Keep read limit <= {self.max_read_rows} when possible.
 10) Use filter operators only from: =, !=, >, <, >=, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL.
 11) If user asks sum/total/count/avg/min/max, return aggregated result (not raw rows).
+12) For text updates:
+    - "replace Y with X" means set column to X where column is Y.
+    - "X instead of Y" means set column to X where column is Y.
+    - If exact match may fail, prefer LIKE for text filters.
 
 JSON format:
 {{
@@ -393,6 +397,7 @@ Constraints:
 - Use operation=read_sql for joins/aggregates when needed
 - read_sql must be a single SELECT statement only
 - If user asked for sum/total/count/avg/min/max, return aggregated output
+- For update/delete with 0 affected rows, re-check filter direction and text matching (LIKE).
 - Use schema below only
 
 Schema:
@@ -487,6 +492,130 @@ JSON:"""
                 continue
             terms.append(term)
         return terms
+
+    @staticmethod
+    def _normalize_text_for_match(value: Any) -> str:
+        text = str(value or "").lower()
+        text = re.sub(r"[^a-z0-9]+", "", text)
+        return text
+
+    @staticmethod
+    def _normalize_phrase(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    def _extract_text_replacement_request(self, question: str) -> Optional[Dict[str, str]]:
+        q = question.strip()
+
+        replace_match = re.search(r"(?is)\breplace\s+(.+?)\s+with\s+(.+?)\s*$", q)
+        if replace_match:
+            old_value = replace_match.group(1).strip(" .,'\"")
+            new_value = replace_match.group(2).strip(" .,'\"")
+            if old_value and new_value:
+                return {"old_value": old_value, "new_value": new_value}
+
+        instead_match = re.search(r"(?is)\b(.+?)\s+instead\s+of\s+(.+?)\s*$", q)
+        if instead_match:
+            new_value = instead_match.group(1).strip(" .,'\"")
+            old_value = instead_match.group(2).strip(" .,'\"")
+            new_value = re.sub(r"(?is)^(?:change|update|set|make|the|all|to)\s+", "", new_value).strip(" .,'\"")
+            if old_value and new_value:
+                return {"old_value": old_value, "new_value": new_value}
+
+        return None
+
+    def _extract_table_hints(self, question: str) -> List[str]:
+        normalized = self._normalize_phrase(question)
+        hints: List[str] = []
+        for table_name in self.schema["tables"].keys():
+            table_phrase = self._normalize_phrase(table_name)
+            if table_phrase and table_phrase in normalized:
+                hints.append(table_name)
+        return hints
+
+    def _extract_column_hints(self, question: str) -> List[str]:
+        normalized_question = self._normalize_phrase(question)
+        hints: List[str] = []
+        for table_meta in self.schema["tables"].values():
+            for column_name in table_meta["columns"].keys():
+                column_phrase = self._normalize_phrase(column_name)
+                if not column_phrase:
+                    continue
+                if column_phrase in normalized_question:
+                    if column_name not in hints:
+                        hints.append(column_name)
+        return hints
+
+    def _heuristic_replace_update(self, question: str) -> Optional[Dict[str, Any]]:
+        parsed = self._extract_text_replacement_request(question)
+        if not parsed:
+            return None
+
+        old_value = parsed["old_value"]
+        new_value = parsed["new_value"]
+        old_norm = self._normalize_text_for_match(old_value)
+        if not old_norm:
+            return None
+
+        table_hints = self._extract_table_hints(question)
+        column_hints = self._extract_column_hints(question)
+
+        candidate_tables = table_hints or list(self.schema["tables"].keys())
+        scored_candidates: List[Tuple[int, str, str, int]] = []
+
+        with self.connection.cursor(dictionary=True) as cursor:
+            for table_name in candidate_tables:
+                table_meta = self.schema["tables"].get(table_name, {})
+                columns = table_meta.get("columns", {})
+                text_columns = [
+                    column_name
+                    for column_name, column_meta in columns.items()
+                    if self._is_text_column_type(column_meta.get("type", ""))
+                ]
+                if not text_columns:
+                    continue
+
+                prioritized_columns = [col for col in text_columns if col in column_hints]
+                scan_columns = prioritized_columns or text_columns
+
+                for column_name in scan_columns:
+                    count_sql = (
+                        f"SELECT COUNT(*) AS total_matches FROM `{table_name}` "
+                        f"WHERE LOWER(REPLACE(CAST(`{column_name}` AS CHAR), ' ', '')) = %s "
+                        f"OR LOWER(REPLACE(CAST(`{column_name}` AS CHAR), ' ', '')) LIKE %s"
+                    )
+                    cursor.execute(count_sql, (old_norm, f"%{old_norm}%"))
+                    total_matches = int((cursor.fetchone() or {}).get("total_matches", 0))
+                    if total_matches <= 0:
+                        continue
+
+                    score = total_matches
+                    if column_name in column_hints:
+                        score += 1000
+                    if table_name in table_hints:
+                        score += 2000
+                    scored_candidates.append((score, table_name, column_name, total_matches))
+
+            if not scored_candidates:
+                return None
+
+            scored_candidates.sort(reverse=True)
+            _, best_table, best_column, _ = scored_candidates[0]
+
+            update_sql = (
+                f"UPDATE `{best_table}` "
+                f"SET `{best_column}` = %s "
+                f"WHERE LOWER(REPLACE(CAST(`{best_column}` AS CHAR), ' ', '')) = %s "
+                f"OR LOWER(REPLACE(CAST(`{best_column}` AS CHAR), ' ', '')) LIKE %s"
+            )
+            cursor.execute(update_sql, (new_value, old_norm, f"%{old_norm}%"))
+            self.connection.commit()
+            affected_rows = int(cursor.rowcount or 0)
+
+        return {
+            "operation": "update",
+            "table": best_table,
+            "affected_rows": affected_rows,
+        }
 
 
     def _fallback_read_search(self, question: str, limit: int = 20) -> Optional[Dict[str, Any]]:
@@ -1081,6 +1210,27 @@ JSON:"""
             fallback = self._fallback_read_search(question)
             if fallback:
                 return self._format_result(fallback)
+
+        if first_result.get("operation") in {"update", "delete"} and int(first_result.get("affected_rows", 0)) == 0:
+            repair_action = self._plan_action(
+                question,
+                repair_error=(
+                    "Update/Delete affected 0 rows. Re-check source vs target wording "
+                    "(for example 'replace Y with X' means set X where Y), and relax text filters using LIKE."
+                ),
+                previous_action=first_action,
+            )
+            try:
+                repair_validated = self._validate_action(repair_action)
+                repair_result = self._execute_action(repair_validated)
+                return self._format_result(repair_result)
+            except Exception:
+                pass
+
+            if first_result.get("operation") == "update":
+                heuristic_result = self._heuristic_replace_update(question)
+                if heuristic_result and int(heuristic_result.get("affected_rows", 0)) > 0:
+                    return self._format_result(heuristic_result)
 
         return self._format_result(first_result)
 
