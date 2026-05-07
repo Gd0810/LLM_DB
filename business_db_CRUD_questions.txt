@@ -1,0 +1,466 @@
+================================================================
+  BUSINESS_DB — CRUD QUESTION BANK (40 Questions)
+  Database  : business_db
+  Tables    : company | product | customer
+================================================================
+
+
+================================================================
+  CREATE — 10 Questions (INSERT)
+================================================================
+
+Q1. Add a new company called 'Vertex AI Labs' in the Technology industry.
+----------------------------------------------------------------
+INSERT INTO company
+  (company_name, industry, country, city, phone, email, established_year, website, annual_revenue)
+VALUES
+  ('Vertex AI Labs', 'Information Technology', 'USA', 'Austin',
+   '+1-512-555-1111', 'hello@vertexailabs.com', 2022,
+   'www.vertexailabs.com', 5000000.00);
+
+Hint: Inserts a brand-new company row. company_id is AUTO_INCREMENT.
+----------------------------------------------------------------
+
+Q2. Add a new product 'Quantum Laptop 16' for TechNova Solutions (company_id=1), priced at $1,299.
+----------------------------------------------------------------
+INSERT INTO product
+  (company_id, product_name, category, unit_price, stock_quantity, sku, description, weight_kg, is_active)
+VALUES
+  (1, 'Quantum Laptop 16', 'Laptops', 1299.00, 200,
+   'TNS-QL-005', '16-inch laptop with quantum chip.', 1.80, 1);
+
+Hint: company_id=1 must exist in company table (FK constraint).
+----------------------------------------------------------------
+
+Q3. Register a new customer 'Ravi Kumar' from Chennai, India, linked to SunRise Apparel (company_id=4).
+----------------------------------------------------------------
+INSERT INTO customer
+  (company_id, first_name, last_name, email, phone, city, country, signup_date, loyalty_points, total_spent)
+VALUES
+  (4, 'Ravi', 'Kumar', 'ravi.kumar@email.com',
+   '+91-94-111-2222', 'Chennai', 'India', CURDATE(), 0, 0.00);
+
+Hint: CURDATE() auto-fills today's signup date.
+----------------------------------------------------------------
+
+Q4. Add three bulk products for GreenLeaf Foods (company_id=2) in one statement.
+----------------------------------------------------------------
+INSERT INTO product
+  (company_id, product_name, category, unit_price, stock_quantity, sku, description, weight_kg, is_active)
+VALUES
+  (2, 'Almond Milk 1L',    'Beverages', 3.49, 4000, 'GLF-AM-005', 'Unsweetened almond milk.',     1.10, 1),
+  (2, 'Chia Seed Pudding', 'Snacks',    4.99, 2500, 'GLF-CP-006', 'Ready-to-eat chia pudding.',   0.25, 1),
+  (2, 'Brown Rice 1kg',    'Grains',    2.99, 6000, 'GLF-BR-007', 'Organic long-grain brown rice.',1.00, 1);
+
+Hint: Multi-row INSERT in one query — more efficient than 3 separate queries.
+----------------------------------------------------------------
+
+Q5. Add a new customer for OceanBlue Pharma with 500 starting loyalty points and total_spent of $150.
+----------------------------------------------------------------
+INSERT INTO customer
+  (company_id, first_name, last_name, email, phone, city, country, signup_date, loyalty_points, total_spent)
+VALUES
+  (5, 'Diana', 'Prince', 'diana.prince@email.com',
+   '+44-20-999-0001', 'London', 'UK', '2024-01-15', 500, 150.00);
+
+Hint: loyalty_points and total_spent can be seeded at registration for migrated customers.
+----------------------------------------------------------------
+
+Q6. Add a new premium product for ClearWater Energy: 'Wind Turbine 5kW' at $8,500.
+----------------------------------------------------------------
+INSERT INTO product
+  (company_id, product_name, category, unit_price, stock_quantity, sku, description, weight_kg, is_active)
+VALUES
+  (9, 'Wind Turbine 5kW', 'Wind Energy', 8500.00, 25,
+   'CWE-WT-004', 'Residential 5kW horizontal-axis wind turbine.', 180.00, 1);
+
+Hint: Stock is low (25) because it is a large industrial item.
+----------------------------------------------------------------
+
+Q7. Insert a new company 'MindWave Analytics' with no website yet (NULL website).
+----------------------------------------------------------------
+INSERT INTO company
+  (company_name, industry, country, city, phone, email, established_year, website, annual_revenue)
+VALUES
+  ('MindWave Analytics', 'Data Analytics', 'India', 'Hyderabad',
+   '+91-40-555-3333', 'info@mindwave.in', 2023, NULL, 1200000.00);
+
+Hint: website column is nullable — pass NULL when not available yet.
+----------------------------------------------------------------
+
+Q8. Add a new product for PixelCraft Studios: 'Motion Graphics Pack' priced at $29.
+----------------------------------------------------------------
+INSERT INTO product
+  (company_id, product_name, category, unit_price, stock_quantity, sku, description, weight_kg, is_active)
+VALUES
+  (10, 'Motion Graphics Pack', 'Design Assets', 29.00, 99999,
+   'PCS-MG-003', 'Over 500 ready-to-use motion graphic elements.', 0.00, 1);
+
+Hint: Digital products have weight_kg = 0 and near-unlimited stock.
+----------------------------------------------------------------
+
+Q9. Register a corporate customer for NovaBuild Constructs with high spending ($42,000) already recorded.
+----------------------------------------------------------------
+INSERT INTO customer
+  (company_id, first_name, last_name, email, phone, city, country, signup_date, loyalty_points, total_spent)
+VALUES
+  (6, 'Samir', 'Al-Farsi', 'samir.alfarsi@email.com',
+   '+971-50-888-4444', 'Dubai', 'UAE', '2020-05-10', 8400, 42000.00);
+
+Hint: High-value client migration — points and spent are pre-loaded.
+----------------------------------------------------------------
+
+Q10. Duplicate GreenLeaf's 'Organic Granola' listing as a new variant 'Organic Granola – Chocolate 500g'.
+----------------------------------------------------------------
+INSERT INTO product
+  (company_id, product_name, category, unit_price, stock_quantity, sku, description, weight_kg, is_active)
+SELECT company_id, 'Organic Granola - Chocolate 500g', category,
+       unit_price + 1.00, 2000, 'GLF-GC-008',
+       'Whole-grain oats with dark chocolate chips.', weight_kg, is_active
+FROM product WHERE sku = 'GLF-GR-001';
+
+Hint: INSERT ... SELECT copies values from an existing row — useful for product variants.
+----------------------------------------------------------------
+
+
+================================================================
+  READ — 10 Questions (SELECT)
+================================================================
+
+Q11. List all companies along with how many products each one sells.
+----------------------------------------------------------------
+SELECT c.company_id, c.company_name, c.industry,
+       COUNT(p.product_id) AS total_products
+FROM company c
+LEFT JOIN product p ON p.company_id = c.company_id
+GROUP BY c.company_id, c.company_name, c.industry
+ORDER BY total_products DESC;
+
+Hint: LEFT JOIN includes companies with 0 products. GROUP BY aggregates per company.
+----------------------------------------------------------------
+
+Q12. Find all customers who have spent more than $10,000, sorted by highest spender first.
+----------------------------------------------------------------
+SELECT customer_id, first_name, last_name, email,
+       country, total_spent, loyalty_points
+FROM customer
+WHERE total_spent > 10000
+ORDER BY total_spent DESC;
+
+Hint: Simple WHERE filter on total_spent column.
+----------------------------------------------------------------
+
+Q13. Show every product priced between $10 and $200 that is currently active.
+----------------------------------------------------------------
+SELECT p.product_id, p.product_name, p.category,
+       p.unit_price, p.stock_quantity, c.company_name
+FROM product p
+JOIN company c ON c.company_id = p.company_id
+WHERE p.unit_price BETWEEN 10 AND 200
+  AND p.is_active = 1
+ORDER BY p.unit_price ASC;
+
+Hint: BETWEEN is inclusive on both ends. JOIN brings in company name.
+----------------------------------------------------------------
+
+Q14. Get the full details of a specific customer by email 'arjun.sharma@email.com'.
+----------------------------------------------------------------
+SELECT cu.*, c.company_name, c.industry
+FROM customer cu
+JOIN company c ON c.company_id = cu.company_id
+WHERE cu.email = 'arjun.sharma@email.com';
+
+Hint: Email is UNIQUE so this returns exactly one row.
+----------------------------------------------------------------
+
+Q15. Show all companies and the total loyalty points of all their customers combined.
+----------------------------------------------------------------
+SELECT c.company_name, c.country,
+       COUNT(cu.customer_id)    AS customer_count,
+       SUM(cu.loyalty_points)   AS total_loyalty_pts,
+       SUM(cu.total_spent)      AS total_revenue_from_customers
+FROM company c
+LEFT JOIN customer cu ON cu.company_id = c.company_id
+GROUP BY c.company_id, c.company_name, c.country
+ORDER BY total_revenue_from_customers DESC;
+
+Hint: SUM aggregates across all customers per company. Great for dashboards.
+----------------------------------------------------------------
+
+Q16. Find all products that are low on stock (quantity below 300).
+----------------------------------------------------------------
+SELECT p.product_name, p.sku, p.category,
+       p.stock_quantity, p.unit_price, c.company_name
+FROM product p
+JOIN company c ON c.company_id = p.company_id
+WHERE p.stock_quantity < 300 AND p.is_active = 1
+ORDER BY p.stock_quantity ASC;
+
+Hint: Useful for inventory alerts — flag items needing restocking.
+----------------------------------------------------------------
+
+Q17. List all customers from India or UAE with their company name.
+----------------------------------------------------------------
+SELECT cu.first_name, cu.last_name, cu.email,
+       cu.city, cu.country, cu.total_spent,
+       c.company_name
+FROM customer cu
+JOIN company c ON c.company_id = cu.company_id
+WHERE cu.country IN ('India', 'UAE')
+ORDER BY cu.country, cu.total_spent DESC;
+
+Hint: IN ('India','UAE') is cleaner than two OR conditions.
+----------------------------------------------------------------
+
+Q18. Show the top 5 most expensive products across all companies.
+----------------------------------------------------------------
+SELECT p.product_name, p.unit_price, p.category,
+       c.company_name, c.country
+FROM product p
+JOIN company c ON c.company_id = p.company_id
+ORDER BY p.unit_price DESC
+LIMIT 5;
+
+Hint: ORDER BY DESC + LIMIT gives a quick top-N ranking.
+----------------------------------------------------------------
+
+Q19. Count how many customers signed up each year.
+----------------------------------------------------------------
+SELECT YEAR(signup_date) AS signup_year,
+       COUNT(*) AS new_customers
+FROM customer
+GROUP BY YEAR(signup_date)
+ORDER BY signup_year ASC;
+
+Hint: YEAR() extracts the year part from a DATE column for grouping.
+----------------------------------------------------------------
+
+Q20. Search for all products in the 'Supplements' or 'Snacks' category with their company details.
+----------------------------------------------------------------
+SELECT p.product_name, p.category, p.unit_price,
+       p.stock_quantity, p.sku,
+       c.company_name, c.country
+FROM product p
+JOIN company c ON c.company_id = p.company_id
+WHERE p.category IN ('Supplements', 'Snacks')
+ORDER BY p.category, p.unit_price;
+
+Hint: Multi-category filter with JOIN to include supplier info.
+----------------------------------------------------------------
+
+
+================================================================
+  UPDATE — 10 Questions (UPDATE)
+================================================================
+
+Q21. Increase the price of 'Vitamin C 1000mg Tabs' by 15%.
+----------------------------------------------------------------
+UPDATE product
+SET unit_price = ROUND(unit_price * 1.15, 2)
+WHERE sku = 'OBP-VC-001';
+
+Hint: Use SKU (UNIQUE) instead of product_id to avoid wrong-row updates.
+----------------------------------------------------------------
+
+Q22. Update the email and phone of customer 'liam.anderson@email.com'.
+----------------------------------------------------------------
+UPDATE customer
+SET email = 'liam.anderson.new@email.com',
+    phone = '+1-415-200-0001'
+WHERE email = 'liam.anderson@email.com';
+
+Hint: Always target by UNIQUE field (email) to update exactly one row.
+----------------------------------------------------------------
+
+Q23. Add 500 loyalty points to all customers who have spent more than $20,000.
+----------------------------------------------------------------
+UPDATE customer
+SET loyalty_points = loyalty_points + 500
+WHERE total_spent > 20000;
+
+Hint: Bulk reward update — affects multiple rows based on spending threshold.
+----------------------------------------------------------------
+
+Q24. Mark all products from PixelCraft Studios (company_id=10) as inactive.
+----------------------------------------------------------------
+UPDATE product
+SET is_active = 0
+WHERE company_id = 10;
+
+Hint: Soft-disable products without deleting them — preserves historical data.
+----------------------------------------------------------------
+
+Q25. Update the annual revenue of 'SteelForge Industries' to $85,000,000.
+----------------------------------------------------------------
+UPDATE company
+SET annual_revenue = 85000000.00
+WHERE company_name = 'SteelForge Industries';
+
+Hint: Financial data update — target by company_name or company_id.
+----------------------------------------------------------------
+
+Q26. Restock 'Solar Panel 400W Mono' — add 500 units to current stock.
+----------------------------------------------------------------
+UPDATE product
+SET stock_quantity = stock_quantity + 500
+WHERE sku = 'CWE-SP-001';
+
+Hint: Increment (+=) pattern — safer than overwriting in case of concurrent updates.
+----------------------------------------------------------------
+
+Q27. Update the city and country of customer 'rahul.gupta@email.com' to 'Pune, India'.
+----------------------------------------------------------------
+UPDATE customer
+SET city = 'Pune', country = 'India'
+WHERE email = 'rahul.gupta@email.com';
+
+Hint: Address change request — single row targeted by unique email.
+----------------------------------------------------------------
+
+Q28. Change the category of 'Men's Linen Shirt' from 'Men's Wear' to 'Casual Wear'.
+----------------------------------------------------------------
+UPDATE product
+SET category = 'Casual Wear'
+WHERE sku = 'SRA-LS-001';
+
+Hint: Category rename — use SKU to avoid ambiguity in product name matching.
+----------------------------------------------------------------
+
+Q29. Set total_spent to 0 and loyalty_points to 0 for all customers who signed up in 2023 (test data reset).
+----------------------------------------------------------------
+UPDATE customer
+SET total_spent    = 0.00,
+    loyalty_points = 0
+WHERE YEAR(signup_date) = 2023;
+
+Hint: Batch reset for test/staging environment cleanup.
+----------------------------------------------------------------
+
+Q30. Update 'NovaBuild Constructs' contact email and phone number.
+----------------------------------------------------------------
+UPDATE company
+SET email = 'newcontact@novabuild.ae',
+    phone = '+971-4-9990606'
+WHERE company_name = 'NovaBuild Constructs';
+
+Hint: Contact info update for a company record.
+----------------------------------------------------------------
+
+
+================================================================
+  DELETE — 10 Questions (DELETE)
+================================================================
+
+Q31. Delete a specific customer by their email address.
+----------------------------------------------------------------
+DELETE FROM customer
+WHERE email = 'mason.young@email.com';
+
+Hint: GDPR/account-closure deletion. Email is UNIQUE — only one row deleted.
+----------------------------------------------------------------
+
+Q32. Remove all inactive products (is_active = 0) from the product table.
+----------------------------------------------------------------
+DELETE FROM product
+WHERE is_active = 0;
+
+Hint: Cleanup query — removes all soft-disabled products permanently.
+----------------------------------------------------------------
+
+Q33. Delete all customers from Australia who have never spent anything.
+----------------------------------------------------------------
+DELETE FROM customer
+WHERE country = 'Australia'
+  AND total_spent = 0.00;
+
+Hint: Combination filter — removes zero-value customers from a region.
+----------------------------------------------------------------
+
+Q34. Remove a product by its SKU code 'PCS-DA-002'.
+----------------------------------------------------------------
+DELETE FROM product
+WHERE sku = 'PCS-DA-002';
+
+Hint: SKU is UNIQUE — safe single-row delete without needing product_id.
+----------------------------------------------------------------
+
+Q35. Delete all customers who signed up before 2020 and have 0 loyalty points.
+----------------------------------------------------------------
+DELETE FROM customer
+WHERE signup_date < '2020-01-01'
+  AND loyalty_points = 0;
+
+Hint: Old inactive accounts cleanup — multi-condition WHERE clause.
+----------------------------------------------------------------
+
+Q36. Remove a company record by company_id (only if it has no products or customers linked).
+----------------------------------------------------------------
+-- Step 1: Check dependencies
+SELECT COUNT(*) FROM product  WHERE company_id = 11;
+SELECT COUNT(*) FROM customer WHERE company_id = 11;
+
+-- Step 2: Delete only if both counts = 0
+DELETE FROM company WHERE company_id = 11;
+
+Hint: FK constraint will block the DELETE if related rows still exist — always check first.
+----------------------------------------------------------------
+
+Q37. Delete all products with stock_quantity = 0 that belong to GreenLeaf Foods.
+----------------------------------------------------------------
+DELETE FROM product
+WHERE company_id = 2
+  AND stock_quantity = 0;
+
+Hint: Removes out-of-stock items for a specific supplier.
+----------------------------------------------------------------
+
+Q38. Delete all customers who are associated with company_id = 7 and have spent less than $500.
+----------------------------------------------------------------
+DELETE FROM customer
+WHERE company_id = 7
+  AND total_spent < 500.00;
+
+Hint: Removes low-value / test accounts linked to BrightMind Edu.
+----------------------------------------------------------------
+
+Q39. Delete duplicate customer emails — keep only the row with the lowest customer_id.
+----------------------------------------------------------------
+DELETE c1
+FROM customer c1
+INNER JOIN customer c2
+  ON c1.email = c2.email
+ AND c1.customer_id > c2.customer_id;
+
+Hint: Self-join deduplication — keeps the earliest record, removes duplicates.
+----------------------------------------------------------------
+
+Q40. Completely wipe all customer records for testing (TRUNCATE — faster than DELETE).
+----------------------------------------------------------------
+-- WARNING: removes ALL rows instantly and resets AUTO_INCREMENT.
+-- Disable FK checks first.
+SET FOREIGN_KEY_CHECKS = 0;
+TRUNCATE TABLE customer;
+SET FOREIGN_KEY_CHECKS = 1;
+
+Hint: TRUNCATE is faster than DELETE for a full-table wipe but cannot be rolled back in most configs.
+----------------------------------------------------------------
+
+
+================================================================
+  QUICK REFERENCE — TABLE STRUCTURE
+================================================================
+
+company  (company_id PK, company_name, industry, country, city,
+          phone, email, established_year, website, annual_revenue)
+
+product  (product_id PK, company_id FK→company, product_name,
+          category, unit_price, stock_quantity, sku UNIQUE,
+          description, weight_kg, is_active)
+
+customer (customer_id PK, company_id FK→company, first_name,
+          last_name, email UNIQUE, phone, city, country,
+          signup_date, loyalty_points, total_spent)
+
+================================================================
+  END OF FILE
+================================================================
