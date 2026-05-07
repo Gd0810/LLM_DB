@@ -32,11 +32,19 @@ If you prefer, install from `requirements.txt` instead of the package:
 python -m pip install -r requirements.txt
 ```
 
-3. Run the chatbot:
+3. Run the CLI chatbot:
 
 ```powershell
 python main.py
 ```
+
+4. Run the web app (HTML/CSS/JS frontend):
+
+```powershell
+python app.py
+```
+
+Then open `http://127.0.0.1:5000` in your browser.
 
 ## Usage
 

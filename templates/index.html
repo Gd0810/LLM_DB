@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM DB Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <header class="hero">
+    <div>
+      <p class="eyebrow">AI + MySQL Workspace</p>
+      <h1>LLM Database Assistant</h1>
+      <p class="sub">Fast web UI on top of your existing backend logic.</p>
+    </div>
+    <div class="pill-wrap">
+      <span class="pill">Database: <strong>{{ database_name }}</strong></span>
+      <span class="pill">Max Rows: <strong>{{ max_read_rows }}</strong></span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card chat-card">
+      <div class="card-title">Chat</div>
+      <div id="chatWindow" class="chat-window"></div>
+      <form id="chatForm" class="chat-form">
+        <input id="questionInput" type="text" placeholder="Ask about products, sales, categories..." autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <section class="card side-card">
+      <div class="card-title">Data Explorer</div>
+
+      <div class="control-row">
+        <label for="tableSelect">Table</label>
+        <select id="tableSelect"></select>
+      </div>
+
+      <div class="control-row">
+        <label for="rowLimit">Rows</label>
+        <input id="rowLimit" type="number" min="1" max="{{ max_read_rows }}" value="50" />
+      </div>
+
+      <div class="btn-row">
+        <button id="loadTableBtn" type="button">Load Table</button>
+        <button id="summaryBtn" type="button" class="ghost">Summary</button>
+      </div>
+
+      <pre id="summaryBox" class="summary-box"></pre>
+    </section>
+
+    <section class="card table-card">
+      <div class="card-title">Table Preview</div>
+      <div id="tableWrap" class="table-wrap">
+        <p class="placeholder">Select a table and click "Load Table".</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

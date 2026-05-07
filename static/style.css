@@ -1,0 +1,272 @@
+:root {
+  --bg: #f4f7f8;
+  --ink: #10231d;
+  --muted: #51645f;
+  --card: #ffffff;
+  --line: #d8e2de;
+  --accent: #0d9f6f;
+  --accent-2: #ffb347;
+  --mono: "IBM Plex Mono", monospace;
+  --sans: "Space Grotesk", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: radial-gradient(circle at 12% 10%, #e8ffef 0%, var(--bg) 38%),
+              radial-gradient(circle at 88% 82%, #fff5db 0%, transparent 42%),
+              var(--bg);
+  min-height: 100vh;
+  padding: 28px;
+}
+
+.bg-glow {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.25;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.bg-glow-1 {
+  width: 260px;
+  height: 260px;
+  background: #6de8b8;
+  top: -80px;
+  right: 14%;
+}
+
+.bg-glow-2 {
+  width: 220px;
+  height: 220px;
+  background: #ffd385;
+  bottom: -60px;
+  left: 10%;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 22px;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+h1 {
+  margin: 6px 0;
+  font-size: clamp(1.8rem, 3vw, 2.7rem);
+}
+
+.sub {
+  margin: 0;
+  color: var(--muted);
+}
+
+.pill-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pill {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.8);
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.87rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1.3fr 0.8fr;
+  gap: 16px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.04);
+}
+
+.card-title {
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.chat-card {
+  min-height: 460px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-window {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.bubble {
+  max-width: 85%;
+  border-radius: 13px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  animation: fadeIn 0.3s ease;
+}
+
+.user {
+  align-self: flex-end;
+  background: #def8e8;
+}
+
+.bot {
+  align-self: flex-start;
+  background: #f4f6f7;
+}
+
+.chat-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+input,
+select,
+button {
+  font-family: var(--sans);
+  font-size: 0.95rem;
+}
+
+input,
+select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.2s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  opacity: 0.92;
+}
+
+button.ghost {
+  background: #f1f4f2;
+  color: var(--ink);
+}
+
+.control-row {
+  margin-bottom: 10px;
+}
+
+.control-row label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+.summary-box {
+  margin-top: 12px;
+  min-height: 120px;
+  max-height: 200px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  background: #f8faf9;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.table-card {
+  grid-column: 1 / -1;
+}
+
+.table-wrap {
+  overflow: auto;
+  max-height: 420px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  padding: 9px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #f9fcfb;
+}
+
+.placeholder {
+  color: var(--muted);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 940px) {
+  body {
+    padding: 16px;
+  }
+
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    flex-direction: column;
+  }
+
+  .pill-wrap {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
